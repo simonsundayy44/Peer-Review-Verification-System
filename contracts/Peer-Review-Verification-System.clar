@@ -6,9 +6,13 @@
 (define-constant err-not-reviewer (err u104))
 (define-constant err-already-reviewed (err u105))
 (define-constant err-invalid-score (err u106))
+(define-constant err-collaboration-not-found (err u107))
+(define-constant err-not-collaboration-member (err u108))
+(define-constant err-collaboration-full (err u109))
 
 (define-data-var min-reviewer-score uint u70)
 (define-data-var review-reward uint u100)
+(define-data-var collaboration-counter uint u0)
 
 (define-map Scientists
     principal
@@ -40,6 +44,7 @@
         status: (string-ascii 20),
         submission-height: uint,
         review-count: uint,
+        collaboration-id: (optional uint),
     }
 )
 
@@ -53,6 +58,28 @@
         feedback: (string-ascii 500),
         review-height: uint,
         verified: bool,
+    }
+)
+
+(define-map Collaborations
+    uint
+    {
+        lead-scientist: principal,
+        research-focus: (string-ascii 100),
+        member-count: uint,
+        creation-height: uint,
+        active: bool,
+    }
+)
+
+(define-map CollaborationMembers
+    {
+        collaboration-id: uint,
+        member: principal,
+    }
+    {
+        joined-height: uint,
+        contribution-score: uint,
     }
 )
 
@@ -77,6 +104,20 @@
     (map-get? Reviews {
         research-id: research-id,
         reviewer: reviewer,
+    })
+)
+
+(define-read-only (get-collaboration (collaboration-id uint))
+    (map-get? Collaborations collaboration-id)
+)
+
+(define-read-only (get-collaboration-member
+        (collaboration-id uint)
+        (member principal)
+    )
+    (map-get? CollaborationMembers {
+        collaboration-id: collaboration-id,
+        member: member,
     })
 )
 
@@ -110,6 +151,60 @@
     )
 )
 
+(define-public (create-collaboration (research-focus (string-ascii 100)))
+    (let (
+            (lead-scientist tx-sender)
+            (collaboration-id (+ (var-get collaboration-counter) u1))
+            (current-height burn-block-height)
+        )
+        (asserts! (is-some (get-scientist lead-scientist)) err-not-registered)
+        (var-set collaboration-counter collaboration-id)
+        (map-set Collaborations collaboration-id {
+            lead-scientist: lead-scientist,
+            research-focus: research-focus,
+            member-count: u1,
+            creation-height: current-height,
+            active: true,
+        })
+        (map-set CollaborationMembers {
+            collaboration-id: collaboration-id,
+            member: lead-scientist,
+        } {
+            joined-height: current-height,
+            contribution-score: u0,
+        })
+        (ok collaboration-id)
+    )
+)
+
+(define-public (join-collaboration (collaboration-id uint))
+    (let (
+            (member tx-sender)
+            (collaboration (unwrap! (get-collaboration collaboration-id)
+                err-collaboration-not-found
+            ))
+            (current-height burn-block-height)
+        )
+        (asserts! (is-some (get-scientist member)) err-not-registered)
+        (asserts! (get active collaboration) err-invalid-status)
+        (asserts! (< (get member-count collaboration) u5) err-collaboration-full)
+        (asserts! (is-none (get-collaboration-member collaboration-id member))
+            err-already-registered
+        )
+        (map-set CollaborationMembers {
+            collaboration-id: collaboration-id,
+            member: member,
+        } {
+            joined-height: current-height,
+            contribution-score: u0,
+        })
+        (map-set Collaborations collaboration-id
+            (merge collaboration { member-count: (+ (get member-count collaboration) u1) })
+        )
+        (ok true)
+    )
+)
+
 (define-public (submit-research
         (title (string-ascii 100))
         (abstract (string-ascii 500))
@@ -130,6 +225,41 @@
             status: "pending",
             submission-height: current-height,
             review-count: u0,
+            collaboration-id: none,
+        })
+        (ok research-id)
+    )
+)
+
+(define-public (submit-collaborative-research
+        (title (string-ascii 100))
+        (abstract (string-ascii 500))
+        (ipfs-hash (string-ascii 64))
+        (collaboration-id uint)
+    )
+    (let (
+            (scientist tx-sender)
+            (research-id (+ (var-get research-counter) u1))
+            (current-height burn-block-height)
+            (collaboration (unwrap! (get-collaboration collaboration-id)
+                err-collaboration-not-found
+            ))
+        )
+        (asserts! (is-some (get-scientist scientist)) err-not-registered)
+        (asserts! (is-some (get-collaboration-member collaboration-id scientist))
+            err-not-collaboration-member
+        )
+        (asserts! (get active collaboration) err-invalid-status)
+        (var-set research-counter research-id)
+        (map-set Research research-id {
+            scientist: scientist,
+            title: title,
+            abstract: abstract,
+            ipfs-hash: ipfs-hash,
+            status: "pending",
+            submission-height: current-height,
+            review-count: u0,
+            collaboration-id: (some collaboration-id),
         })
         (ok research-id)
     )
