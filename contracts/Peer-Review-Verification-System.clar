@@ -9,6 +9,8 @@
 (define-constant err-collaboration-not-found (err u107))
 (define-constant err-not-collaboration-member (err u108))
 (define-constant err-collaboration-full (err u109))
+(define-constant err-citation-not-found (err u110))
+(define-constant err-self-citation (err u111))
 
 (define-data-var min-reviewer-score uint u70)
 (define-data-var review-reward uint u100)
@@ -21,6 +23,7 @@
         institution: (string-ascii 100),
         reputation-score: uint,
         total-submissions: uint,
+        citations-received: uint,
     }
 )
 
@@ -45,6 +48,7 @@
         submission-height: uint,
         review-count: uint,
         collaboration-id: (optional uint),
+        citation-count: uint,
     }
 )
 
@@ -80,6 +84,17 @@
     {
         joined-height: uint,
         contribution-score: uint,
+    }
+)
+
+(define-map Citations
+    {
+        citing-research-id: uint,
+        cited-research-id: uint,
+    }
+    {
+        citation-height: uint,
+        context: (string-ascii 200),
     }
 )
 
@@ -121,6 +136,16 @@
     })
 )
 
+(define-read-only (get-citation
+        (citing-research-id uint)
+        (cited-research-id uint)
+    )
+    (map-get? Citations {
+        citing-research-id: citing-research-id,
+        cited-research-id: cited-research-id,
+    })
+)
+
 (define-public (register-scientist
         (name (string-ascii 50))
         (institution (string-ascii 100))
@@ -132,6 +157,7 @@
             institution: institution,
             reputation-score: u100,
             total-submissions: u0,
+            citations-received: u0,
         }))
     )
 )
@@ -226,6 +252,7 @@
             submission-height: current-height,
             review-count: u0,
             collaboration-id: none,
+            citation-count: u0,
         })
         (ok research-id)
     )
@@ -260,6 +287,7 @@
             submission-height: current-height,
             review-count: u0,
             collaboration-id: (some collaboration-id),
+            citation-count: u0,
         })
         (ok research-id)
     )
@@ -328,5 +356,43 @@
     (let ((research (unwrap! (get-research research-id) err-invalid-status)))
         (asserts! (is-eq tx-sender contract-owner) err-owner-only)
         (ok (map-set Research research-id (merge research { status: new-status })))
+    )
+)
+
+(define-public (cite-research
+        (citing-research-id uint)
+        (cited-research-id uint)
+        (context (string-ascii 200))
+    )
+    (let (
+            (citing-research (unwrap! (get-research citing-research-id) err-invalid-status))
+            (cited-research (unwrap! (get-research cited-research-id) err-citation-not-found))
+            (cited-scientist (get scientist cited-research))
+            (cited-scientist-data (unwrap! (get-scientist cited-scientist) err-not-registered))
+            (current-height burn-block-height)
+        )
+        (asserts! (not (is-eq citing-research-id cited-research-id))
+            err-self-citation
+        )
+        (asserts! (is-eq (get scientist citing-research) tx-sender)
+            err-owner-only
+        )
+        (asserts! (is-none (get-citation citing-research-id cited-research-id))
+            err-already-registered
+        )
+        (map-set Citations {
+            citing-research-id: citing-research-id,
+            cited-research-id: cited-research-id,
+        } {
+            citation-height: current-height,
+            context: context,
+        })
+        (map-set Research cited-research-id
+            (merge cited-research { citation-count: (+ (get citation-count cited-research) u1) })
+        )
+        (map-set Scientists cited-scientist
+            (merge cited-scientist-data { citations-received: (+ (get citations-received cited-scientist-data) u1) })
+        )
+        (ok true)
     )
 )
