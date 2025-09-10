@@ -11,10 +11,14 @@
 (define-constant err-collaboration-full (err u109))
 (define-constant err-citation-not-found (err u110))
 (define-constant err-self-citation (err u111))
+(define-constant err-milestone-not-found (err u112))
+(define-constant err-milestone-completed (err u113))
+(define-constant err-invalid-milestone-status (err u114))
 
 (define-data-var min-reviewer-score uint u70)
 (define-data-var review-reward uint u100)
 (define-data-var collaboration-counter uint u0)
+(define-data-var milestone-counter uint u0)
 
 (define-map Scientists
     principal
@@ -49,6 +53,8 @@
         review-count: uint,
         collaboration-id: (optional uint),
         citation-count: uint,
+        milestone-count: uint,
+        completed-milestones: uint,
     }
 )
 
@@ -98,6 +104,19 @@
     }
 )
 
+(define-map Milestones
+    uint
+    {
+        research-id: uint,
+        title: (string-ascii 100),
+        description: (string-ascii 300),
+        target-completion: uint,
+        status: (string-ascii 20),
+        completion-height: (optional uint),
+        progress-percentage: uint,
+    }
+)
+
 (define-data-var research-counter uint u0)
 
 (define-read-only (get-scientist (scientist-id principal))
@@ -144,6 +163,10 @@
         citing-research-id: citing-research-id,
         cited-research-id: cited-research-id,
     })
+)
+
+(define-read-only (get-milestone (milestone-id uint))
+    (map-get? Milestones milestone-id)
 )
 
 (define-public (register-scientist
@@ -253,6 +276,8 @@
             review-count: u0,
             collaboration-id: none,
             citation-count: u0,
+            milestone-count: u0,
+            completed-milestones: u0,
         })
         (ok research-id)
     )
@@ -288,6 +313,8 @@
             review-count: u0,
             collaboration-id: (some collaboration-id),
             citation-count: u0,
+            milestone-count: u0,
+            completed-milestones: u0,
         })
         (ok research-id)
     )
@@ -392,6 +419,81 @@
         )
         (map-set Scientists cited-scientist
             (merge cited-scientist-data { citations-received: (+ (get citations-received cited-scientist-data) u1) })
+        )
+        (ok true)
+    )
+)
+
+(define-public (create-milestone
+        (research-id uint)
+        (title (string-ascii 100))
+        (description (string-ascii 300))
+        (target-completion uint)
+    )
+    (let (
+            (research (unwrap! (get-research research-id) err-invalid-status))
+            (milestone-id (+ (var-get milestone-counter) u1))
+        )
+        (asserts! (is-eq (get scientist research) tx-sender) err-owner-only)
+        (var-set milestone-counter milestone-id)
+        (map-set Milestones milestone-id {
+            research-id: research-id,
+            title: title,
+            description: description,
+            target-completion: target-completion,
+            status: "pending",
+            completion-height: none,
+            progress-percentage: u0,
+        })
+        (map-set Research research-id
+            (merge research { milestone-count: (+ (get milestone-count research) u1) })
+        )
+        (ok milestone-id)
+    )
+)
+
+(define-public (update-milestone-progress
+        (milestone-id uint)
+        (progress-percentage uint)
+    )
+    (let (
+            (milestone (unwrap! (get-milestone milestone-id) err-milestone-not-found))
+            (research (unwrap! (get-research (get research-id milestone))
+                err-invalid-status
+            ))
+        )
+        (asserts! (is-eq (get scientist research) tx-sender) err-owner-only)
+        (asserts! (not (is-eq (get status milestone) "completed"))
+            err-milestone-completed
+        )
+        (asserts! (<= progress-percentage u100) err-invalid-milestone-status)
+        (ok (map-set Milestones milestone-id
+            (merge milestone { progress-percentage: progress-percentage })
+        ))
+    )
+)
+
+(define-public (complete-milestone (milestone-id uint))
+    (let (
+            (milestone (unwrap! (get-milestone milestone-id) err-milestone-not-found))
+            (research (unwrap! (get-research (get research-id milestone))
+                err-invalid-status
+            ))
+            (current-height burn-block-height)
+        )
+        (asserts! (is-eq (get scientist research) tx-sender) err-owner-only)
+        (asserts! (not (is-eq (get status milestone) "completed"))
+            err-milestone-completed
+        )
+        (map-set Milestones milestone-id
+            (merge milestone {
+                status: "completed",
+                completion-height: (some current-height),
+                progress-percentage: u100,
+            })
+        )
+        (map-set Research (get research-id milestone)
+            (merge research { completed-milestones: (+ (get completed-milestones research) u1) })
         )
         (ok true)
     )
