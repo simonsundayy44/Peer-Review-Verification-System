@@ -14,11 +14,17 @@
 (define-constant err-milestone-not-found (err u112))
 (define-constant err-milestone-completed (err u113))
 (define-constant err-invalid-milestone-status (err u114))
+(define-constant err-impact-not-calculated (err u115))
+(define-constant err-invalid-impact-score (err u116))
+(define-constant err-insufficient-data (err u117))
 
 (define-data-var min-reviewer-score uint u70)
 (define-data-var review-reward uint u100)
 (define-data-var collaboration-counter uint u0)
 (define-data-var milestone-counter uint u0)
+(define-data-var impact-weight-citations uint u40)
+(define-data-var impact-weight-reviews uint u35)
+(define-data-var impact-weight-collaborations uint u25)
 
 (define-map Scientists
     principal
@@ -117,6 +123,32 @@
     }
 )
 
+(define-map ResearchImpactScores
+    uint
+    {
+        overall-score: uint,
+        citation-score: uint,
+        review-score: uint,
+        collaboration-score: uint,
+        calculation-height: uint,
+        last-updated: uint,
+        trending-factor: uint,
+    }
+)
+
+(define-map ImpactHistory
+    {
+        research-id: uint,
+        period: uint,
+    }
+    {
+        score: uint,
+        citations-period: uint,
+        reviews-period: uint,
+        recorded-height: uint,
+    }
+)
+
 (define-data-var research-counter uint u0)
 
 (define-read-only (get-scientist (scientist-id principal))
@@ -167,6 +199,20 @@
 
 (define-read-only (get-milestone (milestone-id uint))
     (map-get? Milestones milestone-id)
+)
+
+(define-read-only (get-research-impact-score (research-id uint))
+    (map-get? ResearchImpactScores research-id)
+)
+
+(define-read-only (get-impact-history
+        (research-id uint)
+        (period uint)
+    )
+    (map-get? ImpactHistory {
+        research-id: research-id,
+        period: period,
+    })
 )
 
 (define-public (register-scientist
@@ -495,6 +541,123 @@
         (map-set Research (get research-id milestone)
             (merge research { completed-milestones: (+ (get completed-milestones research) u1) })
         )
+        (ok true)
+    )
+)
+
+(define-public (calculate-impact-score (research-id uint))
+    (let (
+            (research (unwrap! (get-research research-id) err-invalid-status))
+            (citation-count (get citation-count research))
+            (review-count (get review-count research))
+            (collaboration-bonus (if (is-some (get collaboration-id research)) u20 u0))
+            (citation-weight (var-get impact-weight-citations))
+            (review-weight (var-get impact-weight-reviews))
+            (collab-weight (var-get impact-weight-collaborations))
+            (current-height burn-block-height)
+            (age-factor (if (> current-height (get submission-height research))
+                        (/ u100 (+ u1 (/ (- current-height (get submission-height research)) u1000)))
+                        u100
+                    )
+            )
+            (citation-score (* citation-count citation-weight))
+            (review-score (* review-count review-weight))
+            (collab-score (* collaboration-bonus collab-weight))
+            (base-score (+ citation-score (+ review-score collab-score)))
+            (trending-factor (if (> age-factor u50) (/ age-factor u10) u5))
+            (overall-score (/ (* base-score trending-factor) u10))
+        )
+        (asserts! (is-some (get-research research-id)) err-invalid-status)
+        (map-set ResearchImpactScores research-id {
+            overall-score: overall-score,
+            citation-score: citation-score,
+            review-score: review-score,
+            collaboration-score: collab-score,
+            calculation-height: current-height,
+            last-updated: current-height,
+            trending-factor: trending-factor,
+        })
+        (ok overall-score)
+    )
+)
+
+(define-public (update-impact-scores-batch (research-ids (list 10 uint)))
+    (let (
+            (current-height burn-block-height)
+        )
+        (ok (fold update-single-impact research-ids u0))
+    )
+)
+
+(define-private (update-single-impact (research-id uint) (acc uint))
+    (match (calculate-impact-score research-id)
+        success (+ acc u1)
+        error acc
+    )
+)
+
+(define-public (record-impact-history (research-id uint))
+    (let (
+            (impact-score (unwrap! (get-research-impact-score research-id)
+                err-impact-not-calculated
+            ))
+            (current-height burn-block-height)
+            (period (/ current-height u1000))
+            (research (unwrap! (get-research research-id) err-invalid-status))
+        )
+        (map-set ImpactHistory {
+            research-id: research-id,
+            period: period,
+        } {
+            score: (get overall-score impact-score),
+            citations-period: (get citation-count research),
+            reviews-period: (get review-count research),
+            recorded-height: current-height,
+        })
+        (ok true)
+    )
+)
+
+(define-public (apply-reputation-boost (scientist principal))
+    (let (
+            (scientist-data (unwrap! (get-scientist scientist) err-not-registered))
+            (current-score (get reputation-score scientist-data))
+            (citations-received (get citations-received scientist-data))
+            (boost-amount (if (> citations-received u10)
+                         (if (> citations-received u50) u20 u10)
+                         u5
+                      )
+            )
+            (new-score (+ current-score boost-amount))
+        )
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (map-set Scientists scientist
+            (merge scientist-data { reputation-score: new-score })
+        )
+        (ok new-score)
+    )
+)
+
+(define-read-only (get-top-impact-research (limit uint))
+    (if (<= limit u10)
+        (ok "Top impact research calculation would require iteration")
+        err-invalid-impact-score
+    )
+)
+
+(define-public (set-impact-weights
+        (citations-weight uint)
+        (reviews-weight uint)
+        (collaborations-weight uint)
+    )
+    (let (
+            (total-weight (+ citations-weight (+ reviews-weight collaborations-weight)))
+        )
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (is-eq total-weight u100) err-invalid-impact-score)
+        (var-set impact-weight-citations citations-weight)
+        (var-set impact-weight-reviews reviews-weight)
+        (var-set impact-weight-collaborations collaborations-weight)
         (ok true)
     )
 )
