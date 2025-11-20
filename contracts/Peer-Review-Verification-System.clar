@@ -17,6 +17,7 @@
 (define-constant err-impact-not-calculated (err u115))
 (define-constant err-invalid-impact-score (err u116))
 (define-constant err-insufficient-data (err u117))
+(define-constant err-reviewer-below-min (err u118))
 
 (define-data-var min-reviewer-score uint u70)
 (define-data-var review-reward uint u100)
@@ -44,6 +45,14 @@
         expertise: (string-ascii 100),
         reviews-completed: uint,
         qualification-score: uint,
+    }
+)
+
+(define-map ReviewerRewards
+    principal
+    {
+        pending-rewards: uint,
+        total-earned: uint,
     }
 )
 
@@ -157,6 +166,10 @@
 
 (define-read-only (get-reviewer (reviewer-id principal))
     (map-get? Reviewers reviewer-id)
+)
+
+(define-read-only (get-reviewer-rewards (reviewer-id principal))
+    (map-get? ReviewerRewards reviewer-id)
 )
 
 (define-read-only (get-research (research-id uint))
@@ -375,25 +388,59 @@
             (reviewer tx-sender)
             (research (unwrap! (get-research research-id) err-invalid-status))
             (current-height burn-block-height)
+            (reviewer-data (unwrap! (get-reviewer reviewer) err-not-reviewer))
+            (min-score (var-get min-reviewer-score))
+            (reward-amount (var-get review-reward))
         )
-        (asserts! (is-some (get-reviewer reviewer)) err-not-reviewer)
+        (asserts! (>= (get qualification-score reviewer-data) min-score)
+            err-reviewer-below-min
+        )
         (asserts! (is-none (get-review research-id reviewer))
             err-already-reviewed
         )
         (asserts! (<= score u100) err-invalid-score)
-        (map-set Reviews {
-            research-id: research-id,
-            reviewer: reviewer,
-        } {
-            score: score,
-            feedback: feedback,
-            review-height: current-height,
-            verified: false,
-        })
-        (map-set Research research-id
-            (merge research { review-count: (+ (get review-count research) u1) })
+        (let (
+                (existing-rewards (default-to {
+                        pending-rewards: u0,
+                        total-earned: u0,
+                    } (map-get? ReviewerRewards reviewer)))
+            )
+            (begin
+                (map-set Reviews {
+                    research-id: research-id,
+                    reviewer: reviewer,
+                } {
+                    score: score,
+                    feedback: feedback,
+                    review-height: current-height,
+                    verified: false,
+                })
+                (map-set Research research-id
+                    (merge research { review-count: (+ (get review-count research) u1) })
+                )
+                (map-set ReviewerRewards reviewer {
+                    pending-rewards: (+ (get pending-rewards existing-rewards) reward-amount),
+                    total-earned: (+ (get total-earned existing-rewards) reward-amount),
+                })
+                (ok true)
+            )
         )
-        (ok true)
+    )
+)
+
+(define-public (claim-review-rewards)
+    (let (
+            (reviewer tx-sender)
+            (existing-rewards (default-to {
+                    pending-rewards: u0,
+                    total-earned: u0,
+                } (map-get? ReviewerRewards reviewer)))
+        )
+        (map-set ReviewerRewards reviewer {
+            pending-rewards: u0,
+            total-earned: (get total-earned existing-rewards),
+        })
+        (ok (get pending-rewards existing-rewards))
     )
 )
 
